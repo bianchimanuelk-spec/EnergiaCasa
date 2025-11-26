@@ -1,0 +1,195 @@
+blueprint:
+  name: Gestione carico energetico con auto-discovery e filtro entità
+  description: Spegne dispositivi oltre una soglia e li riaccende sotto un'altra, con ritardo, priorità, controllo consumo, notifiche e filtro per tipo di entità.
+  domain: automation
+  input:
+    sensore_consumo:
+      name: Sensore consumo totale
+      selector:
+        entity:
+          domain: sensor
+
+    soglia_alta:
+      name: Soglia massima (W)
+      default: 2800
+      selector:
+        number:
+          min: 1000
+          max: 10000
+          step: 100
+          unit_of_measurement: W
+
+    soglia_bassa:
+      name: Soglia minima (W)
+      default: 2000
+      selector:
+        number:
+          min: 500
+          max: 5000
+          step: 100
+          unit_of_measurement: W
+
+    soglia_stop_riaccensione:
+      name: Soglia di sicurezza riaccensione (W)
+      default: 2500
+      selector:
+        number:
+          min: 1000
+          max: 10000
+          step: 100
+          unit_of_measurement: W
+
+    ritardo_riaccensione:
+      name: Ritardo prima di riaccendere (minuti)
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 30
+          step: 1
+          unit_of_measurement: min
+
+    auto_discovery:
+      name: Usa ricerca automatica dispositivi
+      default: false
+      selector:
+        boolean:
+
+    domini_inclusi:
+      name: Tipi di entità da includere (auto-discovery)
+      description: Seleziona i domini ammessi (es. switch, light, climate)
+      default:
+        - switch
+      selector:
+        select:
+          multiple: true
+          options:
+            - switch
+            - light
+            - climate
+            - fan
+
+    dispositivi_spegnimento:
+      name: Dispositivi da spegnere (manuale)
+      selector:
+        target:
+          entity:
+            multiple: true
+
+    dispositivi_riaccensione:
+      name: Dispositivi da riaccendere (manuale)
+      selector:
+        target:
+          entity:
+            multiple: true
+
+    esclusioni:
+      name: Dispositivi da escludere (auto-discovery)
+      selector:
+        target:
+          entity:
+            multiple: true
+
+    servizio_notifica:
+      name: Servizio di notifica principale
+      selector:
+        text:
+
+    servizio_telegram:
+      name: Servizio Telegram (opzionale)
+      default: ""
+      selector:
+        text:
+
+mode: single
+trigger:
+  - platform: numeric_state
+    entity_id: !input sensore_consumo
+    above: !input soglia_alta
+    id: alto
+  - platform: numeric_state
+    entity_id: !input sensore_consumo
+    below: !input soglia_bassa
+    id: basso
+
+variables:
+  spenti: []
+  dispositivi_auto: >
+    {% if !input auto_discovery %}
+      []
+    {% else %}
+      {% set domini = !input domini_inclusi %}
+      {% set esclusi = !input esclusioni.entity_id %}
+      {% set all_entities = states | selectattr('domain','in',domini) | selectattr('state','eq','on') | map(attribute='entity_id') | list %}
+      {% set filtrati = all_entities | reject('in', esclusi) | list %}
+      {{ filtrati }}
+    {% endif %}
+
+action:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: alto
+        sequence:
+          - service: !input servizio_notifica
+            data:
+              message: "⚠️ Consumo oltre {{ !input soglia_alta }}W! Avvio riduzione carico."
+          - choose:
+              - conditions: "{{ !input servizio_telegram != '' }}"
+                sequence:
+                  - service: !input servizio_telegram
+                    data:
+                      message: "⚠️ Consumo oltre {{ !input soglia_alta }}W! Avvio riduzione carico."
+          - variables:
+              lista_spegnimento: >
+                {% if !input auto_discovery %}
+                  {{ !input dispositivi_spegnimento.entity_id }}
+                {% else %}
+                  {{ dispositivi_auto }}
+                {% endif %}
+          - repeat:
+              while:
+                - condition: template
+                  value_template: "{{ states(!input sensore_consumo) | float > (!input soglia_bassa + 600) }}"
+                - condition: template
+                  value_template: "{{ lista_spegnimento | length > 0 }}"
+              sequence:
+                - variables:
+                    prossimo: "{{ lista_spegnimento.pop(0) }}"
+                - service: homeassistant.turn_off
+                  target:
+                    entity_id: "{{ prossimo }}"
+                - variables:
+                    spenti: "{{ spenti + [ prossimo ] }}"
+                - delay: "00:00:30"
+          - service: !input servizio_notifica
+            data:
+              message: "✅ Riduzione completata. Dispositivi spenti: {{ spenti | join(', ') }}"
+
+      - conditions:
+          - condition: trigger
+            id: basso
+        sequence:
+          - delay:
+              minutes: !input ritardo_riaccensione
+          - condition: template
+            value_template: "{{ states(!input sensore_consumo) | float < !input soglia_bassa }}"
+          - service: !input servizio_notifica
+            data:
+              message: "✅ Consumo stabile sotto {{ !input soglia_bassa }}W! Riaccendo dispositivi."
+          - repeat:
+              while:
+                - condition: template
+                  value_template: "{{ spenti | length > 0 }}"
+                - condition: template
+                  value_template: "{{ states(!input sensore_consumo) | float < !input soglia_stop_riaccensione }}"
+              sequence:
+                - variables:
+                    prossimo: "{{ spenti.pop(0) }}"
+                - service: homeassistant.turn_on
+                  target:
+                    entity_id: "{{ prossimo }}"
+                - delay: "00:00:30"
+          - service: !input servizio_notifica
+            data:
+              message: "🔄 Riaccensione completata o interrotta per consumo elevato."
