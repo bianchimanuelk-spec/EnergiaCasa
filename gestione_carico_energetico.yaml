@@ -1,8 +1,13 @@
+
 blueprint:
-  name: Gestione carico energetico con auto-discovery e filtro entità
-  description: Spegne dispositivi oltre una soglia e li riaccende sotto un'altra, con ritardo, priorità, controllo consumo, notifiche e filtro per tipo di entità.
+  name: Gestione carico energetico con auto-discovery e filtro entità (HA 2025)
+  description: >
+    Spegne dispositivi oltre una soglia e li riaccende sotto un'altra, con ritardo,
+    priorità, controllo consumo, notifiche migliorate (service principale + Telegram + fallback),
+    e filtro per tipo di entità. Compatibile con Home Assistant 2025.
   domain: automation
   input:
+
     sensore_consumo:
       name: Sensore consumo totale
       selector:
@@ -53,11 +58,11 @@ blueprint:
       name: Usa ricerca automatica dispositivi
       default: false
       selector:
-        boolean:
+        boolean: {}
 
     domini_inclusi:
       name: Tipi di entità da includere (auto-discovery)
-      description: Seleziona i domini ammessi (es. switch, light, climate)
+      description: Seleziona i domini ammessi (es. switch, light, climate, fan)
       default:
         - switch
       selector:
@@ -72,124 +77,175 @@ blueprint:
     dispositivi_spegnimento:
       name: Dispositivi da spegnere (manuale)
       selector:
-        target:
-          entity:
-            multiple: true
+        entity:
+          multiple: true
 
     dispositivi_riaccensione:
       name: Dispositivi da riaccendere (manuale)
+      description: Se vuoto, verranno riaccesi i dispositivi spenti durante la riduzione.
       selector:
-        target:
-          entity:
-            multiple: true
+        entity:
+          multiple: true
 
     esclusioni:
       name: Dispositivi da escludere (auto-discovery)
       selector:
-        target:
-          entity:
-            multiple: true
+        entity:
+          multiple: true
 
     servizio_notifica:
-      name: Servizio di notifica principale
-      selector:
-        text:
-
-    servizio_telegram:
-      name: Servizio Telegram (opzionale)
+      name: Servizio di notifica principale (es. notify.mobile_app_xxx)
+      description: Lascia vuoto per usare persistent_notification come fallback.
       default: ""
       selector:
-        text:
+        text: {}
 
-mode: single
+    servizio_telegram:
+      name: Servizio Telegram (opzionale, es. telegram_bot.send_message)
+      default: ""
+      selector:
+        text: {}
+
+    usa_persistent_notification:
+      name: Fallback su persistent_notification
+      description: Se attivo, oltre ai servizi impostati verrà creato anche un messaggio persistente.
+      default: true
+      selector:
+        boolean: {}
+
+mode: queued
+max: 10
+
+# --- TRIGGER ------------------------------------------------------------
 trigger:
   - platform: numeric_state
     entity_id: !input sensore_consumo
     above: !input soglia_alta
     id: alto
+
   - platform: numeric_state
     entity_id: !input sensore_consumo
     below: !input soglia_bassa
     id: basso
 
+# --- VARIABILI ----------------------------------------------------------
+# Mappiamo gli input su variabili utilizzabili nei template Jinja
 variables:
+  sensore: !input sensore_consumo
+  s_alta: !input soglia_alta
+  s_bassa: !input soglia_bassa
+  s_stop: !input soglia_stop_riaccensione
+  ritardo: !input ritardo_riaccensione
+  auto: !input auto_discovery
+  domini: !input domini_inclusi
+  manual_off: !input dispositivi_spegnimento
+  manual_on: !input dispositivi_riaccensione
+  esclusi: !input esclusioni
+  notify_service: !input servizio_notifica
+  telegram_service: !input servizio_telegram
+  use_pn: !input usa_persistent_notification
+
+  # Stato runtime
   spenti: []
+
+  # Ricerca automatica dei dispositivi accesi per i domini selezionati, escludendo gli indicati
   dispositivi_auto: >
-    {% if !input auto_discovery %}
-      []
-    {% else %}
-      {% set domini = !input domini_inclusi %}
-      {% set esclusi = !input esclusioni.entity_id %}
-      {% set all_entities = states | selectattr('domain','in',domini) | selectattr('state','eq','on') | map(attribute='entity_id') | list %}
+    {% if auto %}
+      {% set all_entities = states
+         | selectattr('domain','in', domini)
+         | selectattr('state','eq','on')
+         | map(attribute='entity_id')
+         | list %}
       {% set filtrati = all_entities | reject('in', esclusi) | list %}
       {{ filtrati }}
+    {% else %}
+      []
     {% endif %}
 
+# --- AZIONI -------------------------------------------------------------
 action:
   - choose:
+      # CASO: CONSUMO ALTO -> Riduzione carico
       - conditions:
           - condition: trigger
             id: alto
         sequence:
-          - service: !input servizio_notifica
-            data:
-              message: "⚠️ Consumo oltre {{ !input soglia_alta }}W! Avvio riduzione carico."
+
+          # Messaggio iniziale
+          - variables:
+              msg_alto: "⚠️ Consumo oltre {{ s_alta }} W! Avvio riduzione carico."
+
+          # Notifica principale (se impostata)
           - choose:
-              - conditions: "{{ !input servizio_telegram != '' }}"
+              - conditions:
+                  - condition: template
+                    value_template: "{{ notify_service | length > 0 }}"
                 sequence:
-                  - service: !input servizio_telegram
+                  - service: "{{ notify_service }}"
                     data:
-                      message: "⚠️ Consumo oltre {{ !input soglia_alta }}W! Avvio riduzione carico."
+                      message: "{{ msg_alto }}"
+
+          # Telegram (se impostato)
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ telegram_service | length > 0 }}"
+                sequence:
+                  - service: "{{ telegram_service }}"
+                    data:
+                      message: "{{ msg_alto }}"
+
+          # Fallback persistent notification
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ use_pn }}"
+                sequence:
+                  - service: persistent_notification.create
+                    data:
+                      title: "Gestione carico"
+                      message: "{{ msg_alto }}"
+
+          # Lista dispositivi da spegnere: auto o manuale
           - variables:
               lista_spegnimento: >
-                {% if !input auto_discovery %}
-                  {{ !input dispositivi_spegnimento.entity_id }}
-                {% else %}
+                {% if auto %}
                   {{ dispositivi_auto }}
+                {% else %}
+                  {{ manual_off }}
                 {% endif %}
+              i: 0
+
+          # Ciclo di riduzione: spegni finché consumo > soglia_bassa + 600 e ci sono elementi
           - repeat:
               while:
                 - condition: template
-                  value_template: "{{ states(!input sensore_consumo) | float > (!input soglia_bassa + 600) }}"
+                  value_template: "{{ (states(sensore) | float(0)) > (s_bassa + 600) }}"
                 - condition: template
-                  value_template: "{{ lista_spegnimento | length > 0 }}"
+                  value_template: "{{ i < (lista_spegnimento | length) }}"
               sequence:
                 - variables:
-                    prossimo: "{{ lista_spegnimento.pop(0) }}"
+                    prossimo: "{{ lista_spegnimento[i] }}"
                 - service: homeassistant.turn_off
                   target:
                     entity_id: "{{ prossimo }}"
                 - variables:
-                    spenti: "{{ spenti + [ prossimo ] }}"
-                - delay: "00:00:30"
-          - service: !input servizio_notifica
-            data:
-              message: "✅ Riduzione completata. Dispositivi spenti: {{ spenti | join(', ') }}"
-
-      - conditions:
-          - condition: trigger
-            id: basso
-        sequence:
-          - delay:
-              minutes: !input ritardo_riaccensione
-          - condition: template
-            value_template: "{{ states(!input sensore_consumo) | float < !input soglia_bassa }}"
-          - service: !input servizio_notifica
-            data:
-              message: "✅ Consumo stabile sotto {{ !input soglia_bassa }}W! Riaccendo dispositivi."
-          - repeat:
-              while:
-                - condition: template
-                  value_template: "{{ spenti | length > 0 }}"
-                - condition: template
-                  value_template: "{{ states(!input sensore_consumo) | float < !input soglia_stop_riaccensione }}"
-              sequence:
+                    spenti: "{{ (spenti + [prossimo]) | unique }}"
                 - variables:
-                    prossimo: "{{ spenti.pop(0) }}"
-                - service: homeassistant.turn_on
-                  target:
-                    entity_id: "{{ prossimo }}"
-                - delay: "00:00:30"
-          - service: !input servizio_notifica
-            data:
-              message: "🔄 Riaccensione completata o interrotta per consumo elevato."
+                    i: "{{ i + 1 }}"
+                - delay:
+                    seconds: 30
+
+          # Notifica finale riduzione
+          - variables:
+              msg_riduzione: >
+                {% if spenti | length > 0 %}
+                  ✅ Riduzione completata. Dispositivi spenti: {{ spenti | join(', ') }}.
+                {% else %}
+                  ℹ️ Nessun dispositivo è stato spento (consumo rientrato prima dell'intervento).
+                {% endif %}
+
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ notify_service | length > 0 }}"
