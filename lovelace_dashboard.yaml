@@ -1,0 +1,43 @@
+
+views:
+  - title: Monitoraggio Consumi
+    path: consumi
+    icon: mdi:flash
+    cards:
+      - type: gauge
+        entity: sensor.power
+        name: Consumo Attuale
+        unit: W
+        min: 0
+        max: 5000
+        severity:
+          green: 0
+          yellow: 2500
+          red: 4000
+
+      - type: statistics-graph
+        title: Andamento Consumo
+        entities:
+          - sensor.power
+        chart_type: line
+        period: hour
+        days_to_show: 1
+        stat_types:
+          - mean
+          - max
+
+      - type: entity
+        entity: sensor.energy_cost
+        name: Costo Totale
+
+      - type: custom:apexcharts-card
+        header:
+          title: Consumo e Costo
+        graph_span: 24h
+        series:
+          - entity: sensor.power
+            name: Consumo (W)
+            type: line
+          - entity: sensor.energy_cost
+            name: Costo (€)
+            type: line
