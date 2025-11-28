@@ -1,5 +1,5 @@
 blueprint:
-  name: Auguri Compleanni via WhatsApp (Rubrica Amici 1–10)
+  name: Auguri Compleanni via WhatsApp (Rubrica Amici 1–100)
   description: >
     Invia auguri di compleanno via WhatsApp (opzionale: Notifica Mobile, Telegram e TTS)
     ai contatti della Rubrica Amici (slot 1–10) definiti con input_text e input_datetime.
@@ -65,7 +65,6 @@ blueprint:
         🎉🎂 Buon compleanno, {{ nome }}! 🎈
         Ti auguro una giornata piena di felicità, risate e momenti speciali! ✨
         Goditi la tua festa! 🥳🎁
-        — Manuel 🎊
       selector:
         text:
           multiline: true
