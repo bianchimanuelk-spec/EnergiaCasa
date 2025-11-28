@@ -1,0 +1,179 @@
+blueprint:
+  name: Auguri Compleanni via WhatsApp (Rubrica Amici 1–10)
+  description: >
+    Invia auguri di compleanno via WhatsApp (opzionale: Notifica Mobile, Telegram e TTS)
+    ai contatti della Rubrica Amici (slot 1–10) definiti con input_text e input_datetime.
+    Include ripetizione annuale e antiripetizione giornaliera.
+    Helpers e Lovelace inclusi in questo file.
+  domain: automation
+  source_url: https://example.local/blueprints/manuel/auguri_compleanni_blueprint.yaml
+  input:
+    trigger_time:
+      name: Orario invio
+      default: "08:00:00"
+      selector:
+        time:
+    whatsapp_enabled:
+      name: Abilita WhatsApp
+      default: true
+      selector:
+        boolean:
+    whatsapp_client_id:
+      name: WhatsApp clientId
+      default: default
+      selector:
+        text:
+    country_code:
+      name: Prefisso paese
+      default: "39"
+      selector:
+        text:
+    mobile_notify_enabled:
+      name: Abilita Notifica Mobile
+      default: true
+      selector:
+        boolean:
+    mobile_notify_service:
+      name: Servizio Notifica Mobile
+      default: notify.mobile_app_tuo_telefono
+      selector:
+        text:
+    telegram_enabled:
+      name: Abilita Telegram
+      default: true
+      selector:
+        boolean:
+    telegram_notify_service:
+      name: Servizio Telegram
+      default: notify.telegram
+      selector:
+        text:
+    tts_enabled:
+      name: Abilita TTS
+      default: true
+      selector:
+        boolean:
+    tts_media_player:
+      name: Media Player per TTS
+      selector:
+        entity:
+          domain: media_player
+      default: media_player.soggiorno
+    whatsapp_message_template:
+      name: Testo WhatsApp
+      default: |
+        🎉🎂 Buon compleanno, {{ nome }}! 🎈
+        Ti auguro una giornata piena di felicità, risate e momenti speciali! ✨
+        Goditi la tua festa! 🥳🎁
+        — Manuel 🎊
+      selector:
+        text:
+          multiline: true
+
+mode: single
+max_exceeded: silent
+
+variables:
+  oggi: "{{ now().strftime('%m-%d') }}"
+  anno_corrente: "{{ now().year }}"
+  country_code: !input country_code
+  whatsapp_client_id: !input whatsapp_client_id
+  amici: >
+    {% set res = [] %}
+    {% for i in range(1, max_slots+1) %}
+      {% set nome = states('input_text.amico_' ~ i ~ '_nome') | trim %}
+      {% set numero = states('input_text.amico_' ~ i ~ '_numero') | trim %}
+      {% set compleanno = states('input_datetime.amico_' ~ i ~ '_compleanno') %}
+      {% set md = compleanno[5:] if compleanno else None %}
+      {% set last_year = states('input_number.amico_' ~ i ~ '_last_sent_year') | int(0) %}
+      {% if nome and numero and numero | regex_match('^[0-9]{10,11}$') and md %}
+        {% set _ = res.append({'idx': i, 'nome': nome, 'numero': numero, 'md': md, 'last_year': last_year}) %}
+      {% endif %}
+    {% endfor %}
+    {{ res }}
+
+trigger:
+  - platform: time
+    at: !input trigger_time
+
+action:
+  - repeat:
+      for_each: "{{ amici }}"
+      sequence:
+        - condition: template
+          value_template: "{{ repeat.item.md == oggi and repeat.item.last_year != anno_corrente }}"
+        - if:
+            - condition: template
+              value_template: "{{ iif((inputs.whatsapp_enabled|default(true)), true, false) }}"
+          then:
+            - service: whatsapp.send_message
+              data:
+                clientId: "{{ whatsapp_client_id }}"
+                to: "{{ country_code ~ repeat.item.numero ~ '@s.whatsapp.net' }}"
+                body:
+                  text: >
+                    {% set nome = repeat.item.nome %}
+                    {{ (inputs.whatsapp_message_template | default("🎉🎂 Buon compleanno, {{ nome }}! 🎈")) | replace("{{ nome }}", nome) }}
+        - service: input_number.set_value
+          data:
+            entity_id: "{{ 'input_number.amico_' ~ repeat.item.idx ~ '_last_sent_year' }}"
+            value: "{{ anno_corrente }}"
+
+# --- Helpers inclusi ---
+input_text:
+{% for i in range(1, max_slots+1) %}
+  amico_{{ i }}_nome:
+    name: Amico {{ i }} - Nome
+    min: 1
+    max: 30
+    mode: text
+  amico_{{ i }}_numero:
+    name: Amico {{ i }} - Numero (solo cifre)
+    min: 10
+    max: 11
+    mode: text
+    pattern: '^[0-9]{10,11}$'
+{% endfor %}
+
+input_datetime:
+{% for i in range(1, max_slots+1) %}
+  amico_{{ i }}_compleanno:
+    name: Amico {{ i }} - Compleanno
+    has_date: true
+    has_time: false
+{% endfor %}
+
+input_number:
+{% for i in range(1, max_slots+1) %}
+  amico_{{ i }}_last_sent_year:
+    name: Amico {{ i }} - Ultimo anno auguri
+    min: 1900
+    max: 2100
+    step: 1
+    mode: box
+{% endfor %}
+
+# --- Pagina Lovelace ---
+lovelace:
+  views:
+    - title: Rubrica Amici
+      path: rubrica-amici
+      icon: mdi:account-group
+      cards:
+        - type: markdown
+          content: |
+            ## 📒 Rubrica Amici
+            Inserisci Nome, Numero (solo cifre) e Compleanno.
+            L'automazione invierà gli auguri ogni anno via WhatsApp.
+        - type: grid
+          columns: 2
+          square: false
+          cards:
+{% for i in range(1, max_slots+1) %}
+            - type: entities
+              title: Amico {{ i }}
+              entities:
+                - input_text.amico_{{ i }}_nome
+                - input_text.amico_{{ i }}_numero
+                - input_datetime.amico_{{ i }}_compleanno
+{% endfor %}
